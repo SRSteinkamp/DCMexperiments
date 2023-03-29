@@ -1,37 +1,5 @@
 # %%
 import numpy as np
-import torch
-
-TR = 2.0
-n_t = round(1e2/TR)
-dtU = round(2 / TR) + 1
-t0U = round(10/TR) + 1
-microDT = 2e-1
-homogenous = 0
-reduced_f = 0
-lin = 1
-stochastic = 0
-alpha = np.inf
-sigma = 1e0
-nconfounds = 0
-
-# %%
-u = np.zeros((2, n_t))
-u[0, t0U: t0U + dtU] = 1
-u[0, 4 * t0U: 4 * t0U + dtU] = 1
-u[1, 4 * t0U: 4 * t0U + 5 * dtU] = 1
-nu = u.shape[0]
-
-# %%
-A = np.array([[0, 1, 1], [1, 0, 1], [0, 1, 0]])
-nreg = A.shape[0]
-B = np.zeros((2, nreg, nreg)).astype('int')
-B[1] = np.array([[0, 0, 0], [1, 0, 0], [0, 0, 0]])
-C = np.array([[1, 0], [0, 0], [0, 0]])
-
-D = np.zeros((nreg, nreg, nreg)).astype('int')
-# %%
-
 
 class DCM:
 
@@ -109,19 +77,24 @@ class DCM:
         dimensions['n'] = 5 * self.nreg  # Number of states
         self.dimensions = dimensions
 
+        # Add hidden states
+
+
+
     def parameters_to_matrix(self, theta):
         evolution = self.evolution
-        A = evolution['A'].copy()
-        A[A != 0] = theta[evolution['indA'], 0]
-        A = A - np.exp(theta[evolution['indself']]) * np.eye(A.shape[0])
+        A = evolution['A'].copy() * 1.0
 
-        B = evolution['B'].copy()
+        A[A != 0] = theta[evolution['indA'], 0]
+        A = A - np.exp(theta[evolution['indself']]) * np.eye(A.shape[0]).astype(float)
+
+        B = evolution['B'].copy() * 1.0
         B[B != 0] = theta[evolution['indB'], 0]
 
-        C = evolution['C'].copy()
+        C = evolution['C'].copy() * 1.0
         C[C != 0] = theta[evolution['indC'], 0]
 
-        D = evolution['D'].copy()
+        D = evolution['D'].copy() * 1.0
         D[D != 0] = theta[evolution['indD'], 0]
 
         return A, B, C, D
@@ -134,6 +107,7 @@ def f_dcm_w_hrf(Xt, theta, ut, DCM):
     xn = Xt[evolution['n5']]
     fx = f_hrf(Xt, theta, xn, DCM)
     fxn = f_dcm_fmri(xn, theta, ut, DCM)
+
     fx[evolution['n5']] = fxn
     return fx
 
@@ -167,12 +141,6 @@ def f_hrf(Xt, theta, ut, DCM):
     ff = (1 - (1 - hrf_e0) ** (1 / x2)) / hrf_e0
 
     f = np.zeros((Xt.shape[0], 1))
-    print(f.shape)
-    print(f[evolution['n1']])
-    print(ut.shape)
-    print(hrf_kas.shape)
-    print(x1.shape)
-    print(x2.shape)
 
     f[evolution['n1']] = hrf_epsilon * ut - hrf_kas * x1 - hrf_kaf * (x2 - 1)
     if not DCM.logx2:
@@ -189,28 +157,37 @@ def f_hrf(Xt, theta, ut, DCM):
 
 def f_dcm_fmri(Xt, theta, ut, DCM):
     A, B, C, D = DCM.parameters_to_matrix(theta)
-    B = ut[np.newaxis, :] @ (B)
-    D = Xt @ D
+    B = np.sum(ut[:, np.newaxis, np.newaxis] * B, 0)
+
+    D = np.sum(Xt[:, np.newaxis] * D, 0)
     C = C @ ut[:, np.newaxis]
 
+
     flow = A + B + D
-    xt = flow.dot(Xt) + C
+
+    xt = Xt  + (flow.dot(Xt) + C) * DCM.evolution['deltat']
 
     return xt
 
 
-# %%
-dcm = DCM(A, B, C, D, TR, microDT)
+def g_hrf(Xt, phi, ut, DCM):
+    observation = DCM.observation
+    TE = DCM.TE
+    E0 = 1./(1 + np.exp(-(phi[observation['ind1']] - 0.6633)))
 
-Xt = np.zeros((dcm.dimensions['n'], n_t))
-theta = np.random.rand(dcm.dimensions['theta'])
-theta = theta[:, np.newaxis]
-# %%
-for n, ut in enumerate(u.T):
-    if n == 0:
-        Xtprev = np.zeros((dcm.dimensions['n'], 1))
-    else:
-        Xtprev = Xt[:, n-1]
-    Xt[:, n] = f_dcm_w_hrf(Xtprev, theta, ut, dcm)
+    epsilon = np.exp(phi[observation['ind2']])
 
-# %%
+    V0 = 4; # resting venous volume
+    r0 = 25;  #ntravascular relaxation rate
+    nu0 = 40.3; # frequency offset
+    k1 = 4.3 * nu0 *E0 *TE;
+    k2 = epsilon *r0 *E0 *TE;
+    k3 = 1 - epsilon;
+
+    x3 = np.exp(Xt[observation['n3'],:])         # blood volume v(t)
+    x4 = np.exp(Xt[observation['n4'],:])         # dHb content q(t)
+
+    x4x3 = np.exp(np.log(x4)-np.log(x3));
+    gx = V0 *(k1 *(1-x4) + k2 *(1-x4x3) + k3 *(1-x3))
+
+    return gx
